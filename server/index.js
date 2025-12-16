@@ -28,37 +28,46 @@ const getNextMatchup = (room) => {
 io.on('connection', (socket) => {
     let currentRoom = null;
 
-    socket.on('create_room', ({ username }) => {
+    socket.on('create_room', ({ username, category }) => {
         const code = generateCode();
+
+        // Generate automatic category image URL from Unsplash
+        const categoryImage = `https://source.unsplash.com/200x200/?${encodeURIComponent(category)}`;
+
         rooms[code] = {
             code,
             host: socket.id,
+            category: category || "General",
+            categoryImage,             // store the image URL
             players: [{ id: socket.id, username, score: 0 }],
-            state: 'LOBBY', // LOBBY, SUBMITTING, VOTING, WINNER
+            state: 'LOBBY',
             submissions: [],
-            bracket: [], // Queue of match ups: [{p1, p2}, ...]
+            bracket: [],
             currentMatchup: null,
             votes: {},
             winner: null
         };
+
         currentRoom = code;
         socket.join(code);
-        socket.emit('room_created', { code, playerId: socket.id });
+        socket.emit('room_created', { code, playerId: socket.id, categoryImage });
         io.to(code).emit('update_state', rooms[code]);
     });
 
-    socket.on('join_room', ({ code, username }) => {
-        const room = rooms[code];
-        if (room && room.state === 'LOBBY') {
-            currentRoom = code;
-            room.players.push({ id: socket.id, username, score: 0 });
-            socket.join(code);
-            socket.emit('joined_room', { code, playerId: socket.id });
-            io.to(code).emit('update_state', room);
-        } else {
-            socket.emit('error', 'Room not found or game started');
-        }
-    });
+
+socket.on('join_room', ({ code, username }) => {
+    const room = rooms[code];
+    if (room && room.state === 'LOBBY') {
+        currentRoom = code;
+        room.players.push({ id: socket.id, username, score: 0 });
+        socket.join(code);
+        socket.emit('joined_room', { code, playerId: socket.id, categoryImage: room.categoryImage });
+        io.to(code).emit('update_state', room);
+    } else {
+        socket.emit('error', 'Room not found or game started');
+    }
+});
+
 
     socket.on('start_submissions', () => {
         if (!currentRoom || !rooms[currentRoom]) return;

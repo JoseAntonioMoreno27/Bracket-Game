@@ -2,7 +2,7 @@
 import io from 'socket.io-client';
 
 // Auto-detect production URL or localhost
-const socketUrl = import.meta.env.PROD ? '/' : 'http://localhost:3000';
+const socketUrl = import.meta.env.PROD ? 'https://thetourney.onrender.com' : 'http://localhost:3000';
 const socket = io(socketUrl);
 
 function App() {

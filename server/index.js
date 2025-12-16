@@ -20,9 +20,24 @@ const rooms = {};
 
 const generateCode = () => Math.random().toString(36).substring(2, 6).toUpperCase();
 
-const getNextMatchup = (room) => {
-    if (room.bracket.length === 0) return null;
-    return room.bracket[0]; // First pair in queue
+// Helper to build rounds from winner list
+const buildRounds = (items) => {
+    const rounds = [];
+    let current = [...items];
+    while (current.length > 0) {
+        const round = [];
+        while (current.length >= 2) {
+            round.push({ a: current.pop(), b: current.pop() });
+        }
+        if (current.length === 1) {
+            round.push({ a: current.pop() }); // bye
+            current = [];
+        }
+        rounds.push(round);
+        // Prepare next round: winners placeholder
+        current = round.map(match => match.winner ? match[match.winner] : match.a);
+    }
+    return rounds;
 };
 
 io.on('connection', (socket) => {
@@ -30,19 +45,18 @@ io.on('connection', (socket) => {
 
     socket.on('create_room', ({ username, category }) => {
         const code = generateCode();
-
-        // Generate automatic category image URL from Unsplash
         const categoryImage = `https://source.unsplash.com/200x200/?${encodeURIComponent(category)}`;
 
         rooms[code] = {
             code,
             host: socket.id,
             category: category || "General",
-            categoryImage,             // store the image URL
+            categoryImage,
             players: [{ id: socket.id, username, score: 0 }],
             state: 'LOBBY',
             submissions: [],
             bracket: [],
+            round2: [],
             currentMatchup: null,
             votes: {},
             winner: null
@@ -54,20 +68,18 @@ io.on('connection', (socket) => {
         io.to(code).emit('update_state', rooms[code]);
     });
 
-
-socket.on('join_room', ({ code, username }) => {
-    const room = rooms[code];
-    if (room && room.state === 'LOBBY') {
-        currentRoom = code;
-        room.players.push({ id: socket.id, username, score: 0 });
-        socket.join(code);
-        socket.emit('joined_room', { code, playerId: socket.id, categoryImage: room.categoryImage });
-        io.to(code).emit('update_state', room);
-    } else {
-        socket.emit('error', 'Room not found or game started');
-    }
-});
-
+    socket.on('join_room', ({ code, username }) => {
+        const room = rooms[code];
+        if (room && room.state === 'LOBBY') {
+            currentRoom = code;
+            room.players.push({ id: socket.id, username, score: 0 });
+            socket.join(code);
+            socket.emit('joined_room', { code, playerId: socket.id, categoryImage: room.categoryImage });
+            io.to(code).emit('update_state', room);
+        } else {
+            socket.emit('error', 'Room not found or game started');
+        }
+    });
 
     socket.on('start_submissions', () => {
         if (!currentRoom || !rooms[currentRoom]) return;
@@ -82,7 +94,8 @@ socket.on('join_room', ({ code, username }) => {
         if (!currentRoom || !rooms[currentRoom]) return;
         const room = rooms[currentRoom];
         if (room.state === 'SUBMITTING') {
-            room.submissions.push({ id: socket.id, text: entry });
+            const imageUrl = `https://source.unsplash.com/100x100/?${encodeURIComponent(entry)}`;
+            room.submissions.push({ id: socket.id, text: entry, image: imageUrl });
             io.to(currentRoom).emit('update_state', room);
         }
     });
@@ -92,20 +105,19 @@ socket.on('join_room', ({ code, username }) => {
         const room = rooms[currentRoom];
         if (socket.id !== room.host || room.submissions.length < 2) return;
 
-        // Generate Bracket
+        // Shuffle submissions
         let items = [...room.submissions];
-        // Shuffle
         items.sort(() => Math.random() - 0.5);
 
-        // Create pairs
+        // Create initial bracket
         const bracket = [];
         while (items.length >= 2) {
             bracket.push({ a: items.pop(), b: items.pop() });
         }
-        // Handle odd one out (auto-win to next round? discard for now for simplicity)
+        if (items.length === 1) room.round2.push(items[0]); // bye to next round
 
         room.bracket = bracket;
-        room.round2 = []; // Storage for winners
+        room.round2 = room.round2 || [];
         room.state = 'VOTING';
         room.currentMatchup = room.bracket.shift();
         room.votes = {};
@@ -113,7 +125,7 @@ socket.on('join_room', ({ code, username }) => {
         io.to(currentRoom).emit('update_state', room);
     });
 
-    socket.on('vote', ({ choice }) => { // choice is 'a' or 'b'
+    socket.on('vote', ({ choice }) => {
         if (!currentRoom || !rooms[currentRoom]) return;
         const room = rooms[currentRoom];
         if (room.state !== 'VOTING') return;
@@ -127,7 +139,7 @@ socket.on('join_room', ({ code, username }) => {
         const room = rooms[currentRoom];
         if (socket.id !== room.host) return;
 
-        // Tally
+        // Determine winner
         let countA = 0;
         let countB = 0;
         Object.values(room.votes).forEach(v => v === 'a' ? countA++ : countB++);
@@ -135,7 +147,6 @@ socket.on('join_room', ({ code, username }) => {
         const winner = countA >= countB ? room.currentMatchup.a : room.currentMatchup.b;
         room.round2.push(winner);
 
-        // Reset votes
         room.votes = {};
 
         if (room.bracket.length > 0) {
@@ -143,27 +154,23 @@ socket.on('join_room', ({ code, username }) => {
         } else {
             // Round over
             if (room.round2.length === 1) {
-                // Game Over
                 room.state = 'WINNER';
                 room.winner = room.round2[0];
 
-                // Persist to SQLite
-                db.run('INSERT INTO winners (room_code, winner_name) VALUES (?, ?)',
+                db.run(
+                    'INSERT INTO winners (room_code, winner_name) VALUES (?, ?)',
                     [room.code, room.winner.text],
                     (err) => { if (err) console.error(err); }
                 );
-
             } else {
-                // Next Round Logic
+                // Next round bracket
                 let items = [...room.round2];
                 room.round2 = [];
                 const newBracket = [];
                 while (items.length >= 2) {
                     newBracket.push({ a: items.pop(), b: items.pop() });
                 }
-                // If odd one remains, they get a bye (push to round2 directly)
-                if (items.length > 0) room.round2.push(items[0]);
-
+                if (items.length === 1) room.round2.push(items[0]); // bye
                 room.bracket = newBracket;
                 room.currentMatchup = room.bracket.shift();
             }
@@ -172,7 +179,7 @@ socket.on('join_room', ({ code, username }) => {
     });
 
     socket.on('disconnect', () => {
-        // Basic cleanup logic could go here
+        // Optional: remove player from room
     });
 });
 
